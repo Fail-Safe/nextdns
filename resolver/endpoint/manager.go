@@ -154,9 +154,11 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 		if err == nil && fastest != nil {
 			m.debugf("Preferring fastest DoH3 endpoint %s (IP: %s)", fastest, fastestIP)
 			if doh, ok := fastest.(*DOHEndpoint); ok && fastestIP != "" {
-				doh.FastestIP = fastestIP
-				doh.transport = nil    // Reset transport so it will be rebuilt with new FastestIP
-				doh.once = sync.Once{} // Reset sync.Once to allow re-init
+				if doh.FastestIP != fastestIP {
+					doh.FastestIP = fastestIP
+					doh.transport = nil    // Reset transport so it will be rebuilt with new FastestIP
+					doh.once = sync.Once{} // Reset sync.Once to allow re-init
+				}
 			}
 			ae := m.newActiveEndpointLocked(fastest)
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

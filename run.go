@@ -484,14 +484,14 @@ func nextdnsEndpointManager(log host.Logger, debug bool, canFallback func() bool
 		preferDoH3 = false
 	}
 	providers := []endpoint.Provider{
-		// Always include DoH3 endpoints first for preference
+		// Only use classic DNS endpoints (IP addresses) for SVCB/HTTPS bootstrap
 		&endpoint.SourceHTTPSSVCProvider{
 			Hostname: "doh3.dns.nextdns.io",
-			Source:   endpoint.MustNew("https://doh3.dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
+			Source:   endpoint.MustNew("45.90.28.0"), // classic DNS
 		},
 		&endpoint.SourceHTTPSSVCProvider{
 			Hostname: "dns.nextdns.io",
-			Source:   endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
+			Source:   endpoint.MustNew("45.90.28.0"), // classic DNS
 		},
 		// Fallback on anycast.
 		endpoint.StaticProvider([]endpoint.Endpoint{

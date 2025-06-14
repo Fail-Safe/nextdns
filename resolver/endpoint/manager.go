@@ -118,6 +118,7 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 	m.debug("Finding best endpoint")
 	var firstEndpoint Endpoint
 	var doh3Endpoints []Endpoint
+	var allEndpoints []Endpoint
 	// print the providers slice for debugging purposes
 	for _, p := range m.Providers {
 		m.debugf("Provider %s", p)
@@ -133,8 +134,8 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 			}
 			continue
 		}
-		// Prefer DoH3 endpoint if available
 		for _, e := range endpoints {
+			allEndpoints = append(allEndpoints, e)
 			m.debugf("Testing endpoint %s", e)
 			if firstEndpoint == nil {
 				firstEndpoint = e
@@ -151,9 +152,9 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 		if err == nil && fastest != nil {
 			m.debugf("Preferring fastest DoH3 endpoint %s (IP: %s)", fastest, fastestIP)
 			if doh, ok := fastest.(*DOHEndpoint); ok && fastestIP != "" {
-				doh.FastestIP = fastestIP // Store the fastest IP, but do not modify Bootstrap
-				doh.transport = nil       // Reset transport so it will be rebuilt with new FastestIP
-				doh.once = sync.Once{}    // Reset sync.Once to allow re-init
+				doh.FastestIP = fastestIP
+				doh.transport = nil    // Reset transport so it will be rebuilt with new FastestIP
+				doh.once = sync.Once{} // Reset sync.Once to allow re-init
 			}
 			ae := m.newActiveEndpointLocked(fastest)
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -174,39 +175,38 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 			m.debugf("Fastest DoH3 endpoint failed: %s", err)
 		}
 	}
-	// } else {
-	// 	m.debug("No DoH3 endpoints found, testing all endpoints")
-	// 	// Otherwise, test all endpoints as before
-	// 	for _, e := range endpoints {
-	// 		m.debugf("Testing endpoint %s", e)
-	// 		ae := m.newActiveEndpointLocked(e)
-	// 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	// 		defer cancel()
-	// 		var tester func(ctx context.Context, testDomain string) error
-	// 		if m.EndpointTester != nil {
-	// 			if t := m.EndpointTester(e); t != nil {
-	// 				tester = t
-	// 			}
-	// 		}
-	// 		if tester == nil {
-	// 			tester = endpointTester(e)
-	// 		}
-	// 		if err = tester(ctx, TestDomain); err != nil {
-	// 			m.debugf("Endpoint err %s", err)
-	// 			if isErrNetUnreachable(err) {
-	// 				// Do not report network unreachable errors, bubble them up.
-	// 				return nil, err
-	// 			}
-	// 			if m.OnError != nil {
-	// 				m.OnError(e, err)
-	// 			}
-	// 			continue
-	// 		}
-	// 		m.debugf("Endpoint selected %s", e)
-	// 		return ae, nil
-	// 	}
-	// }
-	// Fallback to first endpoint with short
+	// Fallback: test all endpoints as before
+	m.debugf("No working DoH3 endpoints, testing all endpoints")
+	for _, e := range allEndpoints {
+		m.debugf("Testing endpoint %s", e)
+		ae := m.newActiveEndpointLocked(e)
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		var tester func(ctx context.Context, testDomain string) error
+		if m.EndpointTester != nil {
+			if t := m.EndpointTester(e); t != nil {
+				tester = t
+			}
+		}
+		if tester == nil {
+			tester = endpointTester(e)
+		}
+		err := tester(ctx, TestDomain)
+		if err != nil {
+			m.debugf("Endpoint err %s", err)
+			if isErrNetUnreachable(err) {
+				// Do not report network unreachable errors, bubble them up.
+				return nil, err
+			}
+			if m.OnError != nil {
+				m.OnError(e, err)
+			}
+			continue
+		}
+		m.debugf("Endpoint selected %s", e)
+		return ae, nil
+	}
+	// Fallback to first endpoint with short interval
 	m.debugf("Falling back to first endpoint %s", firstEndpoint)
 	ae := m.newActiveEndpointLocked(firstEndpoint)
 	ae.testInterval = minTestIntervalFailed

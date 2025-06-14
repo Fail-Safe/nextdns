@@ -300,6 +300,7 @@ func (p *SourceHTTPSSVCProvider) GetEndpoints(ctx context.Context) ([]Endpoint, 
 	if e != nil {
 		endpoints = append(endpoints, e)
 	}
+	MarkDoH3Support(endpoints)
 	return endpoints, nil
 }
 

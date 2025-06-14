@@ -255,6 +255,12 @@ func run(args []string) error {
 			return time.Since(startup) < 10*time.Minute
 		}),
 	}
+	// Start periodic fastest endpoint check (every 5 minute)
+	if p.resolver.Manager != nil {
+		stopCh := make(chan struct{})
+		p.OnStopped = append(p.OnStopped, func() { close(stopCh) })
+		p.resolver.Manager.StartPeriodicFastestCheck(5*time.Minute, stopCh)
+	}
 
 	cacheSize, err := config.ParseBytes(c.CacheSize)
 	if err != nil {
@@ -466,26 +472,43 @@ func isLocalhostMode(c *config.Config) bool {
 // nextdnsEndpointManager returns a endpoint.Manager configured to connect to
 // NextDNS using different steering techniques.
 func nextdnsEndpointManager(log host.Logger, debug bool, canFallback func() bool) *endpoint.Manager {
-	m := &endpoint.Manager{
-		Providers: []endpoint.Provider{
-			// Prefer unicast routing.
-			&endpoint.SourceHTTPSSVCProvider{
-				Hostname: "dns.nextdns.io",
-				Source:   endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
-			},
-			// Try routing without anycast bootstrap.
-			// TOFIX: this creates circular dependency if the /etc/resolv.conf is setup to localhost.
-			// &endpoint.SourceHTTPSSVCProvider{
-			// 	Hostname: "dns.nextdns.io",
-			// 	Source:   endpoint.MustNew("https://dns.nextdns.io"),
-			// },
-			// Fallback on anycast.
-			endpoint.StaticProvider([]endpoint.Endpoint{
-				endpoint.MustNew("https://dns1.nextdns.io#45.90.28.0,2a07:a8c0::"),
-				endpoint.MustNew("https://dns2.nextdns.io#45.90.30.0,2a07:a8c1::"),
-			}),
+	mainEndpoint := endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
+	var preferDoH3 bool
+	var alpnList []string
+	var bootstrapIPs []string
+	if doh, ok := mainEndpoint.(*endpoint.DOHEndpoint); ok {
+		alpnList = doh.ALPN
+		bootstrapIPs = doh.Bootstrap
+		preferDoH3 = endpoint.SupportsDoH3(doh.Hostname, bootstrapIPs, alpnList)
+	} else {
+		preferDoH3 = false
+	}
+	providers := []endpoint.Provider{
+		// Always include DoH3 endpoints first for preference
+		&endpoint.SourceHTTPSSVCProvider{
+			Hostname: "doh3.dns.nextdns.io",
+			Source:   endpoint.MustNew("https://doh3.dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
 		},
-		InitEndpoint: endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
+		&endpoint.SourceHTTPSSVCProvider{
+			Hostname: "dns.nextdns.io",
+			Source:   endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
+		},
+		// Fallback on anycast.
+		endpoint.StaticProvider([]endpoint.Endpoint{
+			endpoint.MustNew("https://doh3.dns1.nextdns.io#45.90.28.0,2a07:a8c0::"),
+			endpoint.MustNew("https://dns1.nextdns.io#45.90.28.0,2a07:a8c0::"),
+			endpoint.MustNew("https://doh3.dns2.nextdns.io#45.90.30.0,2a07:a8c1::"),
+			endpoint.MustNew("https://dns2.nextdns.io#45.90.30.0,2a07:a8c1::"),
+		}),
+	}
+	m := &endpoint.Manager{
+		Providers: providers,
+		InitEndpoint: func() endpoint.Endpoint {
+			if preferDoH3 {
+				return endpoint.MustNew("https://doh3.dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
+			}
+			return endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
+		}(),
 		OnError: func(e endpoint.Endpoint, err error) {
 			log.Warningf("Endpoint failed: %v: %v", e, err)
 		},

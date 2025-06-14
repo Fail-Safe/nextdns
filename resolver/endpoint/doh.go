@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,6 +38,12 @@ type DOHEndpoint struct {
 	// ALPN is the list of alpn-id declared to be supported by the endpoint
 	// through HTTPSSVC or Alt-Svc. If missing, h2 is assumed.
 	ALPN []string
+
+	// DoH3Supported caches whether this endpoint supports DoH3 (HTTP/3).
+	DoH3Supported bool
+
+	// FastestIP is the currently preferred IP for this endpoint, based on latency probing.
+	FastestIP string
 
 	once      sync.Once
 	transport http.RoundTripper
@@ -96,8 +103,43 @@ func (e *DOHEndpoint) Exchange(ctx context.Context, payload, buf []byte) (n int,
 func (e *DOHEndpoint) RoundTrip(req *http.Request) (resp *http.Response, err error) {
 	e.once.Do(func() {
 		if e.transport == nil {
-			e.transport = newTransport(e)
+			addrs := endpointAddrs(e)
+			if e.DoH3Supported {
+				// If using NextDNS and HTTP/3, rewrite hostname to doh3.dns.nextdns.io
+				if strings.EqualFold(e.Hostname, "dns.nextdns.io") {
+					e.Hostname = "doh3.dns.nextdns.io"
+				}
+				e.transport = newTransportH3(e, addrs)
+			} else {
+				e.transport = newTransportH2(e, addrs)
+			}
 		}
 	})
 	return e.transport.RoundTrip(req)
+}
+
+// endpointAddrs returns the list of addresses for a DOHEndpoint, prioritizing FastestIP if set.
+// This version ensures FastestIP is first, with port, and all others follow (with port).
+func endpointAddrs(e *DOHEndpoint) []string {
+	addrs := make([]string, 0, len(e.Bootstrap))
+	for _, ip := range e.Bootstrap {
+		if !strings.Contains(ip, ":") {
+			ip = net.JoinHostPort(ip, "443")
+		}
+		addrs = append(addrs, ip)
+	}
+	if e.FastestIP != "" {
+		fastest := e.FastestIP
+		if !strings.Contains(fastest, ":") {
+			fastest = net.JoinHostPort(fastest, "443")
+		}
+		filtered := make([]string, 0, len(addrs))
+		for _, a := range addrs {
+			if a != fastest {
+				filtered = append(filtered, a)
+			}
+		}
+		addrs = append([]string{fastest}, filtered...)
+	}
+	return addrs
 }

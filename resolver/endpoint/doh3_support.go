@@ -3,23 +3,26 @@ package endpoint
 import (
 	"context"
 	"crypto/tls"
-	"log"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/nextdns/nextdns/host"
 
 	quic "github.com/quic-go/quic-go"
 )
 
 // SupportsDoH3 returns true if DoH3 (HTTP/3) is supported for the given endpoint and bootstrap IPs.
 // This version always attempts a real DoH3 request, regardless of ALPN.
-func SupportsDoH3(endpoint string, bootstrapIPs []string, alpnList []string) bool {
+func SupportsDoH3(endpoint string, bootstrapIPs []string, alpnList []string, logger host.Logger) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := probeDoH3(ctx, endpoint, bootstrapIPs); err == nil {
+	if err := probeDoH3(ctx, endpoint, bootstrapIPs, logger); err == nil {
 		return true
 	}
-	log.Printf("[DoH3] QUIC probe failed for endpoint=%s, trying real DoH3 request", endpoint)
+	if logger != nil {
+		logger.Debugf("[DoH3] QUIC probe failed for endpoint=%s, trying real DoH3 request", endpoint)
+	}
 	if err := probeDoH3Request(ctx, endpoint, bootstrapIPs); err == nil {
 		return true
 	}
@@ -38,25 +41,33 @@ func SupportsDoH3(endpoint string, bootstrapIPs []string, alpnList []string) boo
 // }
 
 // probeDoH3 tries to establish a QUIC connection to the endpoint using all bootstrap IPs.
-func probeDoH3(ctx context.Context, endpoint string, bootstrapIPs []string) error {
+func probeDoH3(ctx context.Context, endpoint string, bootstrapIPs []string, logger host.Logger) error {
 	if len(bootstrapIPs) == 0 {
-		log.Printf("[DoH3] No bootstrap IPs for endpoint=%s", endpoint)
+		if logger != nil {
+			logger.Debugf("[DoH3] No bootstrap IPs for endpoint=%s", endpoint)
+		}
 		return context.DeadlineExceeded
 	}
 	var lastErr error
 	for _, ip := range bootstrapIPs {
 		addr := net.JoinHostPort(ip, "443")
-		log.Printf("[DoH3] Probing QUIC to %s (SNI=%s)", addr, endpoint)
+		if logger != nil {
+			logger.Debugf("[DoH3] Probing QUIC to %s (SNI=%s)", addr, endpoint)
+		}
 		tlsConf := &tls.Config{
 			ServerName: endpoint,
 			NextProtos: []string{"h3"}, // Ensure ALPN "h3" is offered for probe
 		}
 		_, err := quic.DialAddrEarly(ctx, addr, tlsConf, nil)
 		if err == nil {
-			log.Printf("[DoH3] QUIC probe to %s succeeded", addr)
+			if logger != nil {
+				logger.Debugf("[DoH3] QUIC probe to %s succeeded", addr)
+			}
 			return nil // success
 		}
-		log.Printf("[DoH3] QUIC probe to %s failed: %v", addr, err)
+		if logger != nil {
+			logger.Debugf("[DoH3] QUIC probe to %s failed: %v", addr, err)
+		}
 		lastErr = err
 	}
 	return lastErr

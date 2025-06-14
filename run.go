@@ -479,7 +479,7 @@ func nextdnsEndpointManager(log host.Logger, debug bool, canFallback func() bool
 	if doh, ok := mainEndpoint.(*endpoint.DOHEndpoint); ok {
 		alpnList = doh.ALPN
 		bootstrapIPs = doh.Bootstrap
-		preferDoH3 = endpoint.SupportsDoH3(doh.Hostname, bootstrapIPs, alpnList)
+		preferDoH3 = endpoint.SupportsDoH3(doh.Hostname, bootstrapIPs, alpnList, log)
 	} else {
 		preferDoH3 = false
 	}
@@ -518,7 +518,7 @@ func nextdnsEndpointManager(log host.Logger, debug bool, canFallback func() bool
 		initEp = endpoint.MustNew("https://doh3.dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
 	}
 	allEndpoints = append(allEndpoints, initEp)
-	endpoint.MarkDoH3Support(allEndpoints)
+	endpoint.MarkDoH3Support(allEndpoints, log)
 	m := &endpoint.Manager{
 		Providers:    providers,
 		InitEndpoint: initEp,

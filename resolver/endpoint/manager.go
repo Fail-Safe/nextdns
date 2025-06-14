@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/nextdns/nextdns/host"
 )
 
 var TestDomain = "probe-test.dns.nextdns.io."
@@ -306,10 +308,10 @@ func (m *Manager) debugf(format string, a ...interface{}) {
 }
 
 // Check and mark DoH3 support for all DOHEndpoints in a list.
-func MarkDoH3Support(endpoints []Endpoint) {
+func MarkDoH3Support(endpoints []Endpoint, logger host.Logger) {
 	for _, e := range endpoints {
 		if doh, ok := e.(*DOHEndpoint); ok {
-			doh.DoH3Supported = SupportsDoH3(doh.Hostname, doh.Bootstrap, doh.ALPN)
+			doh.DoH3Supported = SupportsDoH3(doh.Hostname, doh.Bootstrap, doh.ALPN, logger)
 		}
 	}
 }

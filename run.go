@@ -501,14 +501,27 @@ func nextdnsEndpointManager(log host.Logger, debug bool, canFallback func() bool
 			endpoint.MustNew("https://dns2.nextdns.io#45.90.30.0,2a07:a8c1::"),
 		}),
 	}
-	m := &endpoint.Manager{
-		Providers: providers,
-		InitEndpoint: func() endpoint.Endpoint {
-			if preferDoH3 {
-				return endpoint.MustNew("https://doh3.dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
+	// Collect all endpoint instances for DoH3 probing
+	var allEndpoints []endpoint.Endpoint
+	for _, p := range providers {
+		if sp, ok := p.(endpoint.StaticProvider); ok {
+			endpoints, _ := sp.GetEndpoints(context.TODO())
+			allEndpoints = append(allEndpoints, endpoints...)
+		} else if svc, ok := p.(*endpoint.SourceHTTPSSVCProvider); ok {
+			if doh, ok := svc.Source.(*endpoint.DOHEndpoint); ok {
+				allEndpoints = append(allEndpoints, doh)
 			}
-			return endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
-		}(),
+		}
+	}
+	initEp := endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
+	if preferDoH3 {
+		initEp = endpoint.MustNew("https://doh3.dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::")
+	}
+	allEndpoints = append(allEndpoints, initEp)
+	endpoint.MarkDoH3Support(allEndpoints)
+	m := &endpoint.Manager{
+		Providers:    providers,
+		InitEndpoint: initEp,
 		OnError: func(e endpoint.Endpoint, err error) {
 			log.Warningf("Endpoint failed: %v: %v", e, err)
 		},

@@ -22,6 +22,7 @@ jobs:
     runs-on: ${{ matrix.config.os }}
     env:
       GOOS: ${{ matrix.config.GOOS }}
+      GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,20 +42,20 @@ jobs:
           path: dist/${{ matrix.config.GOOS }}
           key: "snapshot-${{ matrix.config.GOOS }}-${{ env.sha_short }}"
 
-      - name: Run GoReleaser
-        if: secrets.GORELEASER_KEY != ''
+      - name: Run GoReleaser Pro
+        if: env.GORELEASER_KEY != ''
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser-pro
           version: 2.5.0
           args: release --split --snapshot --clean
-        env:
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
 
   release:
     name: Release
     needs: build
     runs-on: ubuntu-latest
+    env:
+      GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -88,14 +89,13 @@ jobs:
         with: { path: dist/dragonfly, key: "snapshot-dragonfly-${{ env.sha_short }}" }
 
       - name: Run GoReleaser
-        if: secrets.GORELEASER_KEY != ''
+        if: env.GORELEASER_KEY != ''
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser-pro
           version: 2.5.0
           args: continue --merge
         env:
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
           GITHUB_TOKEN: ${{ secrets.RELEASE_GH_TOKEN }}
 
       - name: Flatten artifacts

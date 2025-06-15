@@ -121,7 +121,6 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 	var firstEndpoint Endpoint
 	var doh3Endpoints []Endpoint
 	var allEndpoints []Endpoint
-	// print the providers slice for debugging purposes
 	for _, p := range m.Providers {
 		m.debugf("Provider %s", p)
 		endpoints, err := p.GetEndpoints(ctx)
@@ -147,6 +146,7 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 			}
 		}
 	}
+	// Prefer DoH3 endpoints if available and test them first
 	if len(doh3Endpoints) > 0 {
 		m.debugf("Found %d DoH3 endpoints, testing for the fastest", len(doh3Endpoints))
 		m.debugf("DoH3 endpoints: %v", doh3Endpoints)

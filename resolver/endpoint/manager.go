@@ -100,7 +100,24 @@ func (m *Manager) testLocked(ctx context.Context) error {
 		return err
 	}
 	// Only notify if the new best transport is different from current.
-	if m.activeEndpoint == nil || !m.activeEndpoint.Endpoint.Equal(ae.Endpoint) {
+	var bootstrapChanged bool
+	if m.activeEndpoint != nil && m.activeEndpoint.Endpoint.Equal(ae.Endpoint) {
+		// Check for Bootstrap change for DOHEndpoint
+		if dohNew, okNew := ae.Endpoint.(*DOHEndpoint); okNew {
+			if dohOld, okOld := m.activeEndpoint.Endpoint.(*DOHEndpoint); okOld {
+				dohOld.mu.Lock()
+				oldBootstrap := append([]string{}, dohOld.Bootstrap...)
+				dohOld.mu.Unlock()
+				dohNew.mu.Lock()
+				newBootstrap := append([]string{}, dohNew.Bootstrap...)
+				dohNew.mu.Unlock()
+				if fmt.Sprintf("%v", oldBootstrap) != fmt.Sprintf("%v", newBootstrap) {
+					bootstrapChanged = true
+				}
+			}
+		}
+	}
+	if m.activeEndpoint == nil || !m.activeEndpoint.Endpoint.Equal(ae.Endpoint) || bootstrapChanged {
 		m.activeEndpoint = ae
 		if m.OnChange != nil {
 			m.mu.Unlock()
@@ -180,6 +197,9 @@ func isErrNetUnreachable(err error) bool {
 }
 
 func (m *Manager) newActiveEndpointLocked(e Endpoint) (ae *activeEnpoint) {
+	if doh, ok := e.(*DOHEndpoint); ok {
+		doh.manager = m // Set manager pointer for refresh
+	}
 	if m.activeEndpoint != nil && m.activeEndpoint.Endpoint.Equal(e) {
 		return m.activeEndpoint
 	}
@@ -260,6 +280,40 @@ func (m *Manager) debugf(format string, a ...interface{}) {
 	if m.DebugLog != nil {
 		m.DebugLog(fmt.Sprintf(format, a...))
 	}
+}
+
+// StartLatencyMonitor starts the DoH latency monitor for all DOHEndpoints managed by this Manager.
+func (m *Manager) StartLatencyMonitor(ctx context.Context, testDomain string, numQueries int) {
+	// Runtime check for DebugLog
+	if m.DebugLog == nil {
+		fmt.Fprintln(os.Stdout, "[DoHLatency][DEBUG] m.DebugLog is nil in StartLatencyMonitor!")
+	} else {
+		m.DebugLog("[DoHLatency][DEBUG] m.DebugLog is set in StartLatencyMonitor!")
+	}
+
+	var dohEndpoints []*DOHEndpoint
+	for i, provider := range m.Providers {
+		m.DebugLog(fmt.Sprintf("[DoHLatency][DEBUG] Processing provider %d: %T", i, provider))
+		endpoints, err := provider.GetEndpoints(ctx)
+		if err != nil {
+			m.DebugLog(fmt.Sprintf("[DoHLatency][DEBUG] Provider %d error: %v", i, err))
+			continue
+		}
+		m.DebugLog(fmt.Sprintf("[DoHLatency][DEBUG] Provider %d returned %d endpoints", i, len(endpoints)))
+		for j, ep := range endpoints {
+			m.DebugLog(fmt.Sprintf("[DoHLatency][DEBUG] Endpoint %d type: %T, value: %v", j, ep, ep))
+			if doh, ok := ep.(*DOHEndpoint); ok {
+				dohEndpoints = append(dohEndpoints, doh)
+			} else {
+				m.DebugLog(fmt.Sprintf("[DoHLatency][DEBUG] Endpoint %d is not a *DOHEndpoint: %T", j, ep))
+			}
+		}
+	}
+	// Debug: print all endpoints being monitored
+	for _, doh := range dohEndpoints {
+		m.DebugLog(fmt.Sprintf("[DoHLatency][DEBUG] Monitoring endpoint: Hostname=%s Bootstrap=%v AllBootstrap=%v", doh.Hostname, doh.Bootstrap, doh.AllBootstrap))
+	}
+	StartDoHLatencyMonitor(ctx, dohEndpoints, testDomain, numQueries)
 }
 
 // activeEnpoint handles request successes and errors and perform opportunistic

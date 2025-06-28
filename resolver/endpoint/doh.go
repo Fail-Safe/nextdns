@@ -38,9 +38,15 @@ type DOHEndpoint struct {
 	// through HTTPSSVC or Alt-Svc. If missing, h2 is assumed.
 	ALPN []string
 
+	// AllBootstrap always contains the full original set of bootstrap IPs for latency monitoring.
+	AllBootstrap []string
+
 	once      sync.Once
 	transport http.RoundTripper
 	onConnect func(*ConnectInfo)
+	mu        sync.Mutex // protects Bootstrap and AllBootstrap
+
+	manager *Manager // Pointer to parent Manager for refresh
 }
 
 func (e *DOHEndpoint) Protocol() Protocol {
@@ -94,10 +100,47 @@ func (e *DOHEndpoint) Exchange(ctx context.Context, payload, buf []byte) (n int,
 }
 
 func (e *DOHEndpoint) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+	var needNewTransport bool
+	e.mu.Lock()
 	e.once.Do(func() {
 		if e.transport == nil {
-			e.transport = newTransport(e)
+			needNewTransport = true
 		}
 	})
-	return e.transport.RoundTrip(req)
+	e.mu.Unlock()
+	if needNewTransport {
+		tr := newTransport(e) // may lock e.mu internally
+		e.mu.Lock()
+		if e.transport == nil {
+			e.transport = tr
+		}
+		e.mu.Unlock()
+	}
+	e.mu.Lock()
+	tr := e.transport
+	e.mu.Unlock()
+	return tr.RoundTrip(req)
+}
+
+func (e *DOHEndpoint) CloseIdleConnections() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.transport != nil {
+		if t, ok := e.transport.(interface{ CloseIdleConnections() }); ok {
+			t.CloseIdleConnections()
+		}
+	}
+}
+
+func (e *DOHEndpoint) ResetTransport() {
+	e.mu.Lock()
+	e.transport = nil
+	e.once = sync.Once{}
+	e.mu.Unlock()
+}
+
+func (e *DOHEndpoint) GetBootstrapCopy() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string{}, e.Bootstrap...)
 }

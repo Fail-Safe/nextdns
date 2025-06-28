@@ -68,10 +68,11 @@ func (t transport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func endpointAddrs(e *DOHEndpoint) (addrs []string) {
+	// Always use only the first Bootstrap IP if available
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if len(e.Bootstrap) != 0 {
-		for _, addr := range e.Bootstrap {
-			addrs = append(addrs, net.JoinHostPort(addr, "443"))
-		}
+		addrs = []string{net.JoinHostPort(e.Bootstrap[0], "443")}
 	} else {
 		addrs = []string{net.JoinHostPort(e.Hostname, "443")}
 	}

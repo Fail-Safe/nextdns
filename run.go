@@ -255,6 +255,8 @@ func run(args []string) error {
 			return time.Since(startup) < 10*time.Minute
 		}),
 	}
+	// Start DoH latency monitor for all endpoints (every X min, 5 queries per IP)
+	go p.resolver.Manager.StartLatencyMonitor(context.Background(), "probe-test.dns.nextdns.io.", 5)
 
 	cacheSize, err := config.ParseBytes(c.CacheSize)
 	if err != nil {
@@ -483,6 +485,24 @@ func nextdnsEndpointManager(log host.Logger, debug bool, canFallback func() bool
 			endpoint.StaticProvider([]endpoint.Endpoint{
 				endpoint.MustNew("https://dns1.nextdns.io#45.90.28.0,2a07:a8c0::"),
 				endpoint.MustNew("https://dns2.nextdns.io#45.90.30.0,2a07:a8c1::"),
+				endpoint.MustNew("https://ipv4-hydron-clt-1.edge.nextdns.io#64.187.227.105"),
+				endpoint.MustNew("https://ipv6-hydron-clt-1.edge.nextdns.io#2605:a880:0:7b:0:1:54d:2215"),
+				endpoint.MustNew("https://ipv4-tier-clt-1.edge.nextdns.io#155.254.28.98"),
+				endpoint.MustNew("https://ipv6-tier-clt-1.edge.nextdns.io#2605:6c80:1:60::"),
+				endpoint.MustNew("https://ipv4-anexia-mnz-1.edge.nextdns.io#213.227.173.235"),
+				endpoint.MustNew("https://ipv6-anexia-mnz-1.edge.nextdns.io#2a00:11c0:39:353::3"),
+				endpoint.MustNew("https://ipv4-zepto-xrs-1.edge.nextdns.io#170.39.224.134"),
+				endpoint.MustNew("https://ipv6-zepto-xrs-1.edge.nextdns.io#2a0e:6902:2002:12b:5054:ff:fed7:6b78"),
+				endpoint.MustNew("https://ipv4-hetzner-iad-1.edge.nextdns.io#5.161.43.197"),
+				endpoint.MustNew("https://ipv6-hetzner-iad-1.edge.nextdns.io#2a01:4ff:f0:ac5::1"),
+				endpoint.MustNew("https://ipv4-zepto-iad-1.edge.nextdns.io#199.119.65.94"),
+				endpoint.MustNew("https://ipv6-zepto-iad-1.edge.nextdns.io#2a0b:4342:1a32:f:5054:ff:fe48:d17f"),
+				endpoint.MustNew("https://ipv4-cloudzy-pit-1.edge.nextdns.io#167.88.171.10"),
+				endpoint.MustNew("https://ipv4-teraswitch-pit-1.edge.nextdns.io#74.118.138.167"),
+				endpoint.MustNew("https://ipv4-anexia-atl-1.edge.nextdns.io#162.250.7.137"),
+				endpoint.MustNew("https://ipv6-anexia-atl-1.edge.nextdns.io#2605:380:57:613::5"),
+				endpoint.MustNew("https://ipv4-vultr-atl-1.edge.nextdns.io#45.32.219.28"),
+				endpoint.MustNew("https://ipv6-vultr-atl-1.edge.nextdns.io#2001:19f0:5401:1d93:5400:2ff:fece:25e9"),
 			}),
 		},
 		InitEndpoint: endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),

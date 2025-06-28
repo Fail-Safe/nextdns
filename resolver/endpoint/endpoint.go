@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nextdns/nextdns/internal/dnsmessage"
 )
@@ -65,7 +67,9 @@ func New(server string) (Endpoint, error) {
 			Path:     u.Path,
 		}
 		if u.Fragment != "" {
-			e.Bootstrap = strings.Split(u.Fragment, ",")
+			ips := strings.Split(u.Fragment, ",")
+			e.Bootstrap = append([]string{}, ips...)
+			e.AllBootstrap = append([]string{}, ips...)
 		}
 		return e, nil
 	}
@@ -212,6 +216,9 @@ func (p *SourceURLProvider) GetEndpoints(ctx context.Context) ([]Endpoint, error
 type SourceHTTPSSVCProvider struct {
 	Hostname string
 	Source   Endpoint
+
+	mu            sync.Mutex
+	prevEndpoints []Endpoint
 }
 
 func (p *SourceHTTPSSVCProvider) String() string {
@@ -298,8 +305,36 @@ func (p *SourceHTTPSSVCProvider) GetEndpoints(ctx context.Context) ([]Endpoint, 
 		}
 	}
 	if e != nil {
+		e.AllBootstrap = append([]string{}, e.Bootstrap...)
 		endpoints = append(endpoints, e)
 	}
+
+	// Caching logic: reuse previous endpoints if they are Equal, else update
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.prevEndpoints) == len(endpoints) {
+		for i := range endpoints {
+			// Try to find a previous endpoint with the same Hostname/Path (even if Bootstrap changed)
+			if prev, ok := p.prevEndpoints[i].(*DOHEndpoint); ok {
+				if curr, ok2 := endpoints[i].(*DOHEndpoint); ok2 && prev.Hostname == curr.Hostname && prev.Path == curr.Path {
+					// Always update Bootstrap/AllBootstrap to match the previous object (which may have been updated by the monitor)
+					curr.mu.Lock()
+					prev.mu.Lock()
+					curr.Bootstrap = append([]string{}, prev.Bootstrap...)
+					curr.AllBootstrap = append([]string{}, prev.AllBootstrap...)
+					prev.mu.Unlock()
+					curr.mu.Unlock()
+					endpoints[i] = prev
+					continue
+				}
+			}
+			// Fallback: if still Equal, reuse previous object
+			if endpoints[i].Equal(p.prevEndpoints[i]) {
+				endpoints[i] = p.prevEndpoints[i]
+			}
+		}
+	}
+	p.prevEndpoints = endpoints
 	return endpoints, nil
 }
 
@@ -333,4 +368,144 @@ func parseAlpn(b []byte) ([]string, error) {
 		off += l
 	}
 	return alpn, nil
+}
+
+// StartDoHLatencyMonitor runs a goroutine that every 5 minutes finds the single fastest IP across all DOHEndpoints and sets it as preferred for all.
+// This function is always non-blocking and safe for production use.
+func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testDomain string, numQueries int) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("[DoHLatency] Latency monitor panicked: %v\n", r)
+			}
+		}()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			fmt.Printf("[DoHLatency] Starting new latency monitoring round at %s\n", time.Now().Format(time.RFC3339))
+
+			type result struct {
+				endpointIdx int
+				endpoint    *DOHEndpoint
+				fastestIP   string
+				fastestAvg  float64
+			}
+			resultsCh := make(chan result, len(endpoints))
+			var wg sync.WaitGroup
+
+			for i, e := range endpoints {
+				wg.Add(1)
+				go func(i int, e *DOHEndpoint) {
+					defer wg.Done()
+					fmt.Printf("[DoHLatency] Checking endpoint %d/%d: %s\n", i+1, len(endpoints), e.Hostname)
+					e.mu.Lock()
+					ips := append([]string{}, e.AllBootstrap...)
+					e.mu.Unlock()
+					if len(ips) == 0 {
+						resultsCh <- result{i, e, "", math.MaxFloat64}
+						return
+					}
+					fastestIP := ""
+					fastestAvg := math.MaxFloat64
+					for _, ip := range ips {
+						var total float64
+						var count int
+						for i := 0; i < numQueries; i++ {
+							ctxQ, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+							start := time.Now()
+							clone := &DOHEndpoint{
+								Hostname:  e.Hostname,
+								Path:      e.Path,
+								ALPN:      e.ALPN,
+								Bootstrap: []string{ip},
+							}
+							buf := make([]byte, 1500)
+							payload := make([]byte, 0, 514)
+							b := dnsmessage.NewBuilder(payload, dnsmessage.Header{RecursionDesired: true})
+							if err := b.StartQuestions(); err != nil {
+								cancel()
+								continue
+							}
+							if err := b.Question(dnsmessage.Question{Class: dnsmessage.ClassINET, Type: dnsmessage.TypeA, Name: dnsmessage.MustNewName(testDomain)}); err != nil {
+								cancel()
+								continue
+							}
+							payload, err := b.Finish()
+							if err != nil {
+								cancel()
+								continue
+							}
+							_, err = clone.Exchange(ctxQ, payload, buf)
+							cancel()
+							if err != nil {
+								continue
+							}
+							total += float64(time.Since(start).Milliseconds())
+							count++
+							if i < numQueries-1 {
+								time.Sleep(1000 * time.Millisecond)
+							}
+						}
+						if count == 0 {
+							continue
+						}
+						avg := total / float64(count)
+						fmt.Printf("[DoHLatency] %s: IP %s avg %.2fms over %d queries\n", e.Hostname, ip, avg, count)
+						if avg < fastestAvg {
+							fastestAvg = avg
+							fastestIP = ip
+						}
+					}
+					resultsCh <- result{i, e, fastestIP, fastestAvg}
+				}(i, e)
+			}
+
+			wg.Wait()
+			close(resultsCh)
+
+			globalFastestIP := ""
+			globalFastestAvg := math.MaxFloat64
+			globalFastestHost := ""
+			for res := range resultsCh {
+				if res.fastestIP != "" && res.fastestAvg < globalFastestAvg {
+					globalFastestIP = res.fastestIP
+					globalFastestAvg = res.fastestAvg
+					globalFastestHost = res.endpoint.Hostname
+				}
+			}
+
+			fmt.Printf("[DoHLatency] Global fastest IP: %s (%.2fms, from %s)\n", globalFastestIP, globalFastestAvg, globalFastestHost)
+			if globalFastestIP != "" {
+				for _, e := range endpoints {
+					var needSwitch bool
+					e.mu.Lock()
+					if len(e.Bootstrap) == 0 || e.Bootstrap[0] != globalFastestIP {
+						e.Bootstrap = []string{globalFastestIP}
+						needSwitch = true
+					}
+					e.mu.Unlock()
+					if needSwitch {
+						e.CloseIdleConnections()
+						e.ResetTransport()
+						fmt.Printf("[DoHLatency] %s: switched to global fastest IP %s (avg %.2fms, from %s)\n", e.Hostname, globalFastestIP, globalFastestAvg, globalFastestHost)
+						if e.manager != nil {
+							go func(m *Manager) {
+								ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+								defer cancel()
+								m.Test(ctx2)
+							}(e.manager)
+						}
+					}
+				}
+			} else {
+				fmt.Printf("[DoHLatency] No working bootstrap IPs found across all endpoints.\n")
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }

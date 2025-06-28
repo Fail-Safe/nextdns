@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,16 +17,27 @@ type transport struct {
 	addr     string
 }
 
+var (
+	connCount int64
+)
+
 func newTransportH2(e *DOHEndpoint, addrs []string) http.RoundTripper {
 	d := &parallelDialer{}
 	d.FallbackDelay = -1 // disable happy eyeball, we do our own
 	var t http.RoundTripper = &http.Transport{
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second, // or your preferred value
 		TLSClientConfig: &tls.Config{
 			ServerName:         e.Hostname,
 			RootCAs:            getRootCAs(),
 			ClientSessionCache: tls.NewLRUClientSessionCache(0),
 		},
 		DialContext: func(ctx context.Context, network, _ string) (c net.Conn, err error) {
+			atomic.AddInt64(&connCount, 1)
+			if Log != nil && atomic.LoadInt64(&connCount)%100 == 0 {
+				Log.Debugf("[DoHTransport] Total new connections: %d", atomic.LoadInt64(&connCount))
+			}
 			c, err = d.DialParallel(ctx, network, addrs)
 			if c != nil {
 				// Try to workaround the bug describe in this issue:

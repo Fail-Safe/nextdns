@@ -9,12 +9,17 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/nextdns/nextdns/host"
 	"github.com/nextdns/nextdns/internal/dnsmessage"
 )
+
+// Log is the package-level logger for endpoint package, set by main.
+var Log host.Logger
 
 type Protocol int
 
@@ -376,13 +381,31 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("[DoHLatency] Latency monitor panicked: %v\n", r)
+				Log.Errorf("[DoHLatency] Latency monitor panicked: %v", r)
 			}
 		}()
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
+
+		failFile := "/var/lib/nextdns/doh_failures.json"
+		if _, err := os.Stat("/var/lib/nextdns"); os.IsNotExist(err) {
+			failFile = "./doh_failures.json"
+		}
+
+		// Track IP failures: map[hostname][ip]failCount
+		failCounts := make(map[string]map[string]int)
+		const failThreshold = 3
+		const backoffRounds = 3
+
+		// Load failCounts from file if exists
+		if data, err := os.ReadFile(failFile); err == nil {
+			_ = json.Unmarshal(data, &failCounts)
+		}
+
 		for {
-			fmt.Printf("[DoHLatency] Starting new latency monitoring round at %s\n", time.Now().Format(time.RFC3339))
+			if Log != nil {
+				Log.Infof("[DoHLatency] Starting new latency monitoring round at %s", time.Now().Format(time.RFC3339))
+			}
 
 			type result struct {
 				endpointIdx int
@@ -393,11 +416,19 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 			resultsCh := make(chan result, len(endpoints))
 			var wg sync.WaitGroup
 
+			// Track global fastest as results arrive
+			var globalFastestIP string
+			var globalFastestAvg float64 = math.MaxFloat64
+			var globalFastestHost string
+			var mu sync.Mutex // protect globalFastest* vars
+
 			for i, e := range endpoints {
 				wg.Add(1)
 				go func(i int, e *DOHEndpoint) {
 					defer wg.Done()
-					fmt.Printf("[DoHLatency] Checking endpoint %d/%d: %s\n", i+1, len(endpoints), e.Hostname)
+					if Log != nil {
+						Log.Debugf("[DoHLatency] Checking endpoint %d/%d: %s", i+1, len(endpoints), e.Hostname)
+					}
 					e.mu.Lock()
 					ips := append([]string{}, e.AllBootstrap...)
 					e.mu.Unlock()
@@ -405,9 +436,24 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 						resultsCh <- result{i, e, "", math.MaxFloat64}
 						return
 					}
+					if failCounts[e.Hostname] == nil {
+						failCounts[e.Hostname] = make(map[string]int)
+					}
 					fastestIP := ""
 					fastestAvg := math.MaxFloat64
+					buf := make([]byte, 1500)
+					payload := make([]byte, 0, 514)
 					for _, ip := range ips {
+						fail := failCounts[e.Hostname][ip]
+						if fail >= failThreshold {
+							if Log != nil {
+								Log.Debugf("[DoHLatency] Skipping IP %s for %s (failures: %d)", ip, e.Hostname, fail)
+							}
+							if fail < failThreshold+backoffRounds {
+								failCounts[e.Hostname][ip]++ // increment backoff round
+							}
+							continue
+						}
 						var total float64
 						var count int
 						for i := 0; i < numQueries; i++ {
@@ -419,9 +465,7 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 								ALPN:      e.ALPN,
 								Bootstrap: []string{ip},
 							}
-							buf := make([]byte, 1500)
-							payload := make([]byte, 0, 514)
-							b := dnsmessage.NewBuilder(payload, dnsmessage.Header{RecursionDesired: true})
+							b := dnsmessage.NewBuilder(payload[:0], dnsmessage.Header{RecursionDesired: true})
 							if err := b.StartQuestions(); err != nil {
 								cancel()
 								continue
@@ -430,12 +474,12 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 								cancel()
 								continue
 							}
-							payload, err := b.Finish()
+							payloadOut, err := b.Finish()
 							if err != nil {
 								cancel()
 								continue
 							}
-							_, err = clone.Exchange(ctxQ, payload, buf)
+							_, err = clone.Exchange(ctxQ, payloadOut, buf)
 							cancel()
 							if err != nil {
 								continue
@@ -447,10 +491,14 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 							}
 						}
 						if count == 0 {
+							failCounts[e.Hostname][ip]++ // increment failure count
 							continue
 						}
+						failCounts[e.Hostname][ip] = 0 // reset on success
 						avg := total / float64(count)
-						fmt.Printf("[DoHLatency] %s: IP %s avg %.2fms over %d queries\n", e.Hostname, ip, avg, count)
+						if Log != nil {
+							Log.Debugf("[DoHLatency] %s: IP %s avg %.2fms over %d queries", e.Hostname, ip, avg, count)
+						}
 						if avg < fastestAvg {
 							fastestAvg = avg
 							fastestIP = ip
@@ -460,21 +508,23 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 				}(i, e)
 			}
 
-			wg.Wait()
-			close(resultsCh)
-
-			globalFastestIP := ""
-			globalFastestAvg := math.MaxFloat64
-			globalFastestHost := ""
-			for res := range resultsCh {
+			// Process results as they arrive
+			for n := 0; n < len(endpoints); n++ {
+				res := <-resultsCh
 				if res.fastestIP != "" && res.fastestAvg < globalFastestAvg {
+					mu.Lock()
 					globalFastestIP = res.fastestIP
 					globalFastestAvg = res.fastestAvg
 					globalFastestHost = res.endpoint.Hostname
+					mu.Unlock()
 				}
 			}
+			wg.Wait()
+			close(resultsCh)
 
-			fmt.Printf("[DoHLatency] Global fastest IP: %s (%.2fms, from %s)\n", globalFastestIP, globalFastestAvg, globalFastestHost)
+			if Log != nil {
+				Log.Infof("[DoHLatency] Global fastest IP: %s (%.2fms, from %s)", globalFastestIP, globalFastestAvg, globalFastestHost)
+			}
 			if globalFastestIP != "" {
 				for _, e := range endpoints {
 					var needSwitch bool
@@ -487,7 +537,9 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 					if needSwitch {
 						e.CloseIdleConnections()
 						e.ResetTransport()
-						fmt.Printf("[DoHLatency] %s: switched to global fastest IP %s (avg %.2fms, from %s)\n", e.Hostname, globalFastestIP, globalFastestAvg, globalFastestHost)
+						if Log != nil {
+							Log.Infof("[DoHLatency] %s: switched to global fastest IP %s (avg %.2fms, from %s)", e.Hostname, globalFastestIP, globalFastestAvg, globalFastestHost)
+						}
 						if e.manager != nil {
 							go func(m *Manager) {
 								ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -497,8 +549,13 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 						}
 					}
 				}
-			} else {
-				fmt.Printf("[DoHLatency] No working bootstrap IPs found across all endpoints.\n")
+			} else if Log != nil {
+				Log.Debug("[DoHLatency] No working bootstrap IPs found across all endpoints.")
+			}
+
+			// After round, persist failCounts
+			if data, err := json.MarshalIndent(failCounts, "", "  "); err == nil {
+				_ = os.WriteFile(failFile, data, 0644)
 			}
 
 			select {

@@ -154,6 +154,8 @@ func run(args []string) error {
 		log = host.NewConsoleLogger("nextdns")
 		log.Warningf("Service logger error (switching to console): %v", err)
 	}
+	// Make logger available to endpoint package
+	endpoint.Log = log
 	p := &proxySvc{
 		log: log,
 	}

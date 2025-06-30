@@ -32,6 +32,9 @@ func ObserveCacheResponseDuration(seconds float64)       {}
 func ObserveTCPUpstreamResponseDuration(seconds float64) {}
 func ObserveUDPUpstreamResponseDuration(seconds float64) {}
 
+func ObserveEndpointSelected(endpoint string, ip string)                          {}
+func ObserveEndpointResponseDuration(endpoint string, ip string, seconds float64) {}
+
 func EstimateCacheEntrySize(key, value interface{}) int { return 0 }
 
 var InflightTCP int64

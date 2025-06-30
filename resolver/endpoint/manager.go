@@ -177,6 +177,7 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 				continue
 			}
 			m.debugf("Endpoint selected %s", e)
+			// metrics.ObserveEndpointSelected(e.String())
 			return ae, nil
 		}
 	}
@@ -184,6 +185,7 @@ func (m *Manager) findBestEndpointLocked(ctx context.Context) (*activeEnpoint, e
 	m.debugf("Falling back to first endpoint %s", firstEndpoint)
 	ae := m.newActiveEndpointLocked(firstEndpoint)
 	ae.testInterval = minTestIntervalFailed
+	// metrics.ObserveEndpointSelected(firstEndpoint.String())
 	return ae, nil
 }
 

@@ -99,6 +99,21 @@ var (
 		Name: "nextdns_inflight_queries_upstream_udp",
 		Help: "Current number of in-flight DNS queries to upstreams (DNS53).",
 	})
+	endpointSelectedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "nextdns_endpoint_selected_total",
+			Help: "Number of times an endpoint was selected.",
+		},
+		[]string{"endpoint", "ip"},
+	)
+	endpointResponseDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "nextdns_endpoint_response_duration_seconds",
+			Help:    "Histogram of DNS response durations per endpoint.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"endpoint", "ip"},
+	)
 )
 
 var (
@@ -135,6 +150,8 @@ func Init() {
 	prometheus.MustRegister(upstreamIdleConnGauge)
 	prometheus.MustRegister(upstreamInflightGaugeTCP)
 	prometheus.MustRegister(upstreamInflightGaugeUDP)
+	prometheus.MustRegister(endpointSelectedCounter)
+	prometheus.MustRegister(endpointResponseDuration)
 }
 
 func IncQueries() {
@@ -219,6 +236,14 @@ func ObserveTCPUpstreamResponseDuration(seconds float64) {
 
 func ObserveUDPUpstreamResponseDuration(seconds float64) {
 	upstreamUDPResponseDurationHistogram.Observe(seconds)
+}
+
+func ObserveEndpointSelected(endpoint string, ip string) {
+	endpointSelectedCounter.WithLabelValues(endpoint, ip).Inc()
+}
+
+func ObserveEndpointResponseDuration(endpoint string, ip string, seconds float64) {
+	endpointResponseDuration.WithLabelValues(endpoint, ip).Observe(seconds)
 }
 
 // Call this for every UDP query with the client IP

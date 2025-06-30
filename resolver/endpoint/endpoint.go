@@ -16,6 +16,7 @@ import (
 
 	"github.com/nextdns/nextdns/host"
 	"github.com/nextdns/nextdns/internal/dnsmessage"
+	"github.com/nextdns/nextdns/metrics"
 )
 
 // Log is the package-level logger for endpoint package, set by main.
@@ -526,10 +527,12 @@ func StartDoHLatencyMonitor(ctx context.Context, endpoints []*DOHEndpoint, testD
 				Log.Infof("[DoHLatency] Global fastest IP: %s (%.2fms, from %s)", globalFastestIP, globalFastestAvg, globalFastestHost)
 			}
 			if globalFastestIP != "" {
+				metrics.ObserveEndpointSelected(globalFastestHost, globalFastestIP)
+				metrics.ObserveEndpointResponseDuration(globalFastestHost, globalFastestIP, globalFastestAvg/1000) // convert ms to seconds
 				for _, e := range endpoints {
 					var needSwitch bool
 					e.mu.Lock()
-					if len(e.Bootstrap) == 0 || e.Bootstrap[0] != globalFastestIP {
+					if !(len(e.Bootstrap) == 1 && e.Bootstrap[0] == globalFastestIP) {
 						e.Bootstrap = []string{globalFastestIP}
 						needSwitch = true
 					}
